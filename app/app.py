@@ -13,6 +13,7 @@ class App:
     def setup_services(self):
         logger.info("Setting up services...")
         self.container.register("example_service", ExampleService())
+        
 
     async def setup_telegram(self):
         if settings.RUN_TELEGRAM:
