@@ -1,20 +1,15 @@
 from aiogram import Router, types
 from aiogram.filters import CommandStart
+from typing import TYPE_CHECKING
 from app.container import Container
 
-router = Router()
-container: Container | None = None  # Will be injected
+if TYPE_CHECKING:
+    from app.services.example_service import ExampleService
 
-def setup_router(di_container: Container):
-    global container
-    container = di_container
+router = Router()
 
 @router.message(CommandStart())
-async def cmd_start(message: types.Message):
-    if not container:
-        await message.answer("Service not initialized")
-        return
-
-    example_service = container.get("example_service")
+async def cmd_start(message: types.Message, container: Container):
+    example_service: "ExampleService" = container.get("example_service")
     msg = example_service.get_message()
     await message.answer(f"Bot says: {msg}")

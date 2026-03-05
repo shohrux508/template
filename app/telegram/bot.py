@@ -7,8 +7,8 @@ async def start_telegram(container: Container):
     bot = Bot(token=settings.BOT_TOKEN)
     dp = Dispatcher()
 
-    # Inject dependency into routers
-    example.setup_router(container)
+    # Pass the container into the Dispatcher to bypass globals
+    dp["container"] = container
 
     # Include routers
     dp.include_router(example.router)

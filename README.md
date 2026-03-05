@@ -72,11 +72,11 @@ project/
 
 ### Добавление роутера (Telegram)
 1. Создайте роутер в `app/telegram/routers/`.
-2. Подключите его в `app/telegram/bot.py`.
+2. Подключите его в `app/telegram/bot.py`. Роутеры автоматически получат `container` из `Dispatcher` при вызове хендлера.
 
 ### Добавление роутера (API)
 1. Создайте роутер в `app/api/routers/`.
-2. Подключите его в `app/api/server.py`.
+2. Подключите его в `app/api/server.py`. Для получения зависимостей используйте `Depends` и функцию `get_example_service` (или аналогичную) из `app/api/dependencies.py`.
 
 ## Стек технологий
 
