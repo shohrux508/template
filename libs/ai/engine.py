@@ -21,6 +21,7 @@ from loguru import logger
 class LLMProvider(str, Enum):
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
+    GEMINI = "gemini"
 
 
 class LLMConfig(BaseModel):
@@ -60,10 +61,11 @@ class LLMEngine:
                 kwargs["base_url"] = self.config.base_url
             self._client = AsyncOpenAI(**kwargs)
 
-        elif self.config.provider == LLMProvider.ANTHROPIC:
-            from anthropic import AsyncAnthropic
+        elif self.config.provider == LLMProvider.GEMINI:
+            import google.generativeai as genai
 
-            self._client = AsyncAnthropic(api_key=self.config.api_key)
+            genai.configure(api_key=self.config.api_key)
+            self._client = genai.GenerativeModel(model_name=self.config.model)
 
         return self._client
 
@@ -87,6 +89,8 @@ class LLMEngine:
                 return await self._ask_openai(client, prompt, system, temp, tokens)
             elif self.config.provider == LLMProvider.ANTHROPIC:
                 return await self._ask_anthropic(client, prompt, system, temp, tokens)
+            elif self.config.provider == LLMProvider.GEMINI:
+                return await self._ask_gemini(client, prompt, system, temp, tokens)
             else:
                 raise ValueError(f"Неизвестный провайдер: {self.config.provider}")
         except Exception as e:
@@ -129,6 +133,33 @@ class LLMEngine:
                 ) as stream:
                     async for text in stream.text_stream:
                         yield text
+
+            elif self.config.provider == LLMProvider.GEMINI:
+                from google.generativeai.types import GenerationConfig
+
+                # Если передан системный промпт, нужно пересоздать модель с ним
+                model = client
+                if system:
+                    import google.generativeai as genai
+
+                    model = genai.GenerativeModel(
+                        model_name=self.config.model,
+                        system_instruction=system,
+                    )
+
+                gen_config = GenerationConfig(
+                    temperature=self.config.temperature,
+                    max_output_tokens=self.config.max_tokens,
+                )
+
+                stream = await model.generate_content_async(
+                    prompt,
+                    generation_config=gen_config,
+                    stream=True,
+                )
+                async for chunk in stream:
+                    if chunk.text:
+                        yield chunk.text
         except Exception as e:
             logger.error("LLMEngine.ask_stream ошибка: {}", e)
             raise
@@ -175,6 +206,36 @@ class LLMEngine:
 
         response = await client.messages.create(**kwargs)
         return response.content[0].text
+
+    async def _ask_gemini(
+        self,
+        model: Any,
+        prompt: str,
+        system: str | None,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        from google.generativeai.types import GenerationConfig
+
+        # Если передан системный промпт, нужно пересоздать модель с ним
+        if system:
+            import google.generativeai as genai
+
+            model = genai.GenerativeModel(
+                model_name=self.config.model,
+                system_instruction=system,
+            )
+
+        gen_config = GenerationConfig(
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
+
+        response = await model.generate_content_async(
+            prompt,
+            generation_config=gen_config,
+        )
+        return response.text
 
     # ── Жизненный цикл ──────────────────────────────────────────────────
 

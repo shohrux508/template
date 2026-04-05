@@ -11,6 +11,7 @@ loguru
 # ── AI ────────────────────────────────────────────────────────
 openai
 anthropic
+google-generativeai
 
 # ── RAG / Vector ──────────────────────────────────────────────
 qdrant-client
