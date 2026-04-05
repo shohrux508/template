@@ -248,22 +248,43 @@ container.console.table(data, title="Отчет за день")
 
 ### Добавление роутера (Telegram)
 1. Создайте роутер в `app/telegram/routers/`.
-<<<<<<< HEAD
-2. Подключите в `app/telegram/bot.py`.
+2. Подключите его в `app/telegram/bot.py`. Роутеры автоматически получат `container` из `Dispatcher`.
 
 ### Добавление роутера (API)
 1. Создайте роутер в `app/api/routers/`.
-2. Подключите в `app/api/server.py`.
+2. Подключите его в `app/api/server.py`. Используйте `Depends` из `app/api/dependencies.py`.
 
 ### Отключение ненужного модуля libs/
-Закомментируйте соответствующие строки в `app/app.py` → `setup_libs()`.
-=======
-2. Подключите его в `app/telegram/bot.py`. Роутеры автоматически получат `container` из `Dispatcher` при вызове хендлера.
+Закомментируйте соответствующую строку `register_lazy(...)` в `app/app.py` → `setup_libs()`.
 
-### Добавление роутера (API)
-1. Создайте роутер в `app/api/routers/`.
-2. Подключите его в `app/api/server.py`. Для получения зависимостей используйте `Depends` и функцию `get_example_service` (или аналогичную) из `app/api/dependencies.py`.
->>>>>>> 26ceb92084a5d68755257b9edf5d54583b4e0f76
+## Makefile
+
+| Команда | Описание |
+|---|---|
+| `make run` | Запустить приложение |
+| `make test` | Запустить тесты |
+| `make test-cov` | Тесты с покрытием |
+| `make lint` | Проверка линтером (ruff) |
+| `make format` | Форматирование кода |
+| `make install` | Установить зависимости |
+| `make install-dev` | Зависимости + dev-инструменты |
+| `make up` | Поднять инфраструктуру (Docker) |
+| `make down` | Остановить инфраструктуру |
+| `make clean` | Удалить кэши |
+
+## Docker Compose
+
+Одной командой поднимает всю инфраструктуру для разработки:
+
+```bash
+docker compose up -d    # или: make up
+```
+
+| Сервис | Порт | Назначение |
+|---|---|---|
+| **Redis** | 6379 | Кэш, состояние системы |
+| **Mosquitto** | 1883 / 9001 | MQTT-брокер (TCP + WebSocket) |
+| **Qdrant** | 6333 / 6334 | Векторная БД для RAG (REST + gRPC) |
 
 ## Стек технологий
 

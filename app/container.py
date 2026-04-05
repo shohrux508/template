@@ -1,38 +1,63 @@
 """
-app.container — Простой DI-контейнер / реестр сервисов.
+app.container — DI-контейнер с поддержкой ленивой инициализации.
 
-Поддерживает строгую типизацию при получении библиотечных сервисов
-через именованные property, а также произвольные пользовательские
-сервисы через .register() / .get().
+Поддерживает два режима:
+  - register(name, instance)        — немедленная регистрация (лёгкие объекты)
+  - register_lazy(name, factory)    — объект создаётся при ПЕРВОМ обращении
+
+Typed property accessors для libs/ также используют ленивый путь.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 
 class Container:
-    """Service-locator для всех зависимостей приложения."""
+    """Service-locator с ленивой инициализацией тяжёлых зависимостей."""
 
     def __init__(self) -> None:
         self._services: dict[str, Any] = {}
+        self._factories: dict[str, Callable[[], Any]] = {}
 
     # ── Универсальный реестр ─────────────────────────────────────────────
 
     def register(self, name: str, instance: Any) -> None:
-        """Зарегистрировать сервис по имени. Повторная регистрация = ошибка."""
-        if name in self._services:
+        """Зарегистрировать готовый экземпляр (лёгкие объекты)."""
+        if name in self._services or name in self._factories:
             raise ValueError(f"Сервис '{name}' уже зарегистрирован")
         self._services[name] = instance
 
+    def register_lazy(self, name: str, factory: Callable[[], Any]) -> None:
+        """Зарегистрировать фабрику — объект будет создан при первом вызове get().
+
+        Подходит для тяжёлых модулей: Playwright, Pandas-обёрток, и т.д.
+        Ленивая инициализация экономит память и ускоряет старт приложения.
+        """
+        if name in self._services or name in self._factories:
+            raise ValueError(f"Сервис '{name}' уже зарегистрирован")
+        self._factories[name] = factory
+
     def get(self, name: str) -> Any:
-        """Получить сервис по имени."""
-        if name not in self._services:
-            raise ValueError(f"Сервис '{name}' не найден")
-        return self._services[name]
+        """Получить сервис по имени. Если зарегистрирован лениво — создаст при первом вызове."""
+        # Уже создан?
+        if name in self._services:
+            return self._services[name]
+
+        # Есть фабрика? Создаём, кешируем, удаляем фабрику.
+        if name in self._factories:
+            instance = self._factories.pop(name)()
+            self._services[name] = instance
+            return instance
+
+        raise ValueError(f"Сервис '{name}' не найден")
 
     def has(self, name: str) -> bool:
-        """Проверить, зарегистрирован ли сервис."""
+        """Проверить, зарегистрирован ли сервис (включая ленивые)."""
+        return name in self._services or name in self._factories
+
+    def is_initialized(self, name: str) -> bool:
+        """Проверить, был ли ленивый сервис уже инициализирован."""
         return name in self._services
 
     # ── Typed accessors для libs/ ────────────────────────────────────────

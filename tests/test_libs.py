@@ -4,7 +4,7 @@
 import pytest
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Container
+#  Container (+ lazy init)
 # ═══════════════════════════════════════════════════════════════════════════
 
 from app.container import Container
@@ -32,6 +32,46 @@ class TestContainer:
         assert c.has("x") is False
         c.register("x", 42)
         assert c.has("x") is True
+
+    def test_register_lazy(self):
+        """Фабрика вызывается только при первом get()."""
+        call_count = 0
+
+        def factory():
+            nonlocal call_count
+            call_count += 1
+            return {"lazy": True}
+
+        c = Container()
+        c.register_lazy("heavy", factory)
+
+        # Фабрика ещё не вызвана
+        assert call_count == 0
+        assert c.has("heavy") is True
+        assert c.is_initialized("heavy") is False
+
+        # Первый get — вызывает фабрику
+        result = c.get("heavy")
+        assert result == {"lazy": True}
+        assert call_count == 1
+        assert c.is_initialized("heavy") is True
+
+        # Второй get — из кэша, фабрика НЕ вызывается повторно
+        result2 = c.get("heavy")
+        assert result2 == {"lazy": True}
+        assert call_count == 1
+
+    def test_register_lazy_duplicate_raises(self):
+        c = Container()
+        c.register_lazy("x", lambda: 1)
+        with pytest.raises(ValueError, match="уже зарегистрирован"):
+            c.register_lazy("x", lambda: 2)
+
+    def test_register_lazy_vs_eager_conflict(self):
+        c = Container()
+        c.register("eager", 1)
+        with pytest.raises(ValueError, match="уже зарегистрирован"):
+            c.register_lazy("eager", lambda: 2)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -139,10 +179,13 @@ class TestWSConfigAndClient:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Data — AnalysisService
+#  Data — AnalysisService (Pydantic results)
 # ═══════════════════════════════════════════════════════════════════════════
 
-from libs.data.analysis import AnalysisService, MetricsSummary, TimeSeriesConfig
+from libs.data.analysis import (
+    AnalysisService, AnalysisResult, MetricsSummary,
+    AnomalyReport, OutlierReport, ColumnStats, TimeSeriesConfig,
+)
 
 
 class TestAnalysisService:
@@ -150,20 +193,47 @@ class TestAnalysisService:
         self.svc = AnalysisService()
 
     def test_process_metrics_empty(self):
-        import pandas as pd
-        df = self.svc.process_metrics([])
-        assert isinstance(df, pd.DataFrame)
-        assert len(df) == 0
+        result = self.svc.process_metrics([])
+        assert isinstance(result, AnalysisResult)
+        assert result.summary.count == 0
+        assert result.records == []
 
-    def test_process_metrics(self):
+    def test_process_metrics_returns_pydantic(self):
         data = [{"temp": 22.0, "hum": 60}, {"temp": 23.5, "hum": 55}]
-        df = self.svc.process_metrics(data)
+        result = self.svc.process_metrics(data)
+        assert isinstance(result, AnalysisResult)
+        assert result.summary.count == 2
+        assert "temp" in result.summary.columns
+        assert len(result.records) == 2
+
+    def test_process_metrics_df_property(self):
+        """AnalysisResult.df возвращает DataFrame для VizService."""
+        data = [{"val": 1}, {"val": 2}]
+        result = self.svc.process_metrics(data)
+        df = result.df
         assert len(df) == 2
-        assert "temp" in df.columns
+        assert "val" in df.columns
+
+    def test_process_metrics_json_serializable(self):
+        """AnalysisResult можно сериализовать в JSON (для API / Telegram)."""
+        data = [{"temp": 22.5, "hum": 60}]
+        result = self.svc.process_metrics(data)
+        json_data = result.model_dump()
+        assert json_data["summary"]["count"] == 1
+        assert isinstance(json_data["summary"]["stats"]["temp"], dict)
+
+    def test_column_stats(self):
+        data = [{"val": i} for i in range(10)]
+        result = self.svc.process_metrics(data)
+        stats = result.summary.stats["val"]
+        assert isinstance(stats, ColumnStats)
+        assert stats.mean == pytest.approx(4.5)
+        assert stats.min == 0.0
+        assert stats.max == 9.0
 
     def test_describe(self):
-        data = [{"val": i} for i in range(10)]
-        df = self.svc.process_metrics(data)
+        import pandas as pd
+        df = pd.DataFrame([{"val": i} for i in range(10)])
         summary = self.svc.describe(df)
         assert isinstance(summary, MetricsSummary)
         assert summary.count == 10
@@ -180,15 +250,41 @@ class TestAnalysisService:
         result = AnalysisService.normalize(values)
         assert result == [0.0, 0.5, 1.0]
 
-    def test_detect_anomalies(self):
-        # Достаточно большая выборка, чтобы 100.0 явно выделялась как аномалия
+    def test_detect_anomalies_returns_pydantic(self):
+        """detect_anomalies возвращает AnomalyReport (Pydantic)."""
         values = [10.0, 10.1, 9.9, 10.0, 10.2, 9.8, 10.0, 10.1, 9.9, 100.0]
-        anomalies = AnalysisService.detect_anomalies(values, threshold=2.0)
-        assert 9 in anomalies  # 100.0 — индекс 9
+        report = AnalysisService.detect_anomalies(values, threshold=2.0)
+        assert isinstance(report, AnomalyReport)
+        assert 9 in report.anomaly_indices
+        assert report.anomaly_count >= 1
+        assert report.total_values == 10
+
+    def test_detect_anomalies_no_anomalies(self):
+        values = [10.0, 10.1, 9.9, 10.0]
+        report = AnalysisService.detect_anomalies(values, threshold=3.0)
+        assert report.anomaly_count == 0
+        assert report.anomaly_indices == []
+
+    def test_filter_outliers_returns_pydantic(self):
+        """filter_outliers возвращает OutlierReport (Pydantic)."""
+        import pandas as pd
+        df = pd.DataFrame({"val": [10, 10, 10, 10, 100]})
+        report = self.svc.filter_outliers(df, "val", std_factor=1.5)
+        assert isinstance(report, OutlierReport)
+        assert report.original_count == 5
+        assert report.removed_count > 0
+        assert report.column == "val"
+
+    def test_filter_outliers_df(self):
+        """filter_outliers_df возвращает очищенный DataFrame."""
+        import pandas as pd
+        df = pd.DataFrame({"val": [10, 10, 10, 10, 100]})
+        filtered = self.svc.filter_outliers_df(df, "val", std_factor=1.5)
+        assert len(filtered) < len(df)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Data — VizService (проверяем только инициализацию; рендер = side-effect)
+#  Data — VizService
 # ═══════════════════════════════════════════════════════════════════════════
 
 from libs.data.viz import VizService, PlotConfig
@@ -214,7 +310,7 @@ from libs.crawler.parser import ParserService, ParsedItem
 
 class TestParserService:
     def setup_method(self):
-        self.parser = ParserService(use_selectolax=False)  # BS4 гарантированно есть
+        self.parser = ParserService(use_selectolax=False)
 
     def test_css_select(self):
         html = '<div class="item"><h2>Title</h2><span>Price</span></div>'
@@ -329,7 +425,7 @@ class TestConsole:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  ExampleService (сохраняем обратную совместимость)
+#  ExampleService (обратная совместимость)
 # ═══════════════════════════════════════════════════════════════════════════
 
 from app.services.example_service import ExampleService

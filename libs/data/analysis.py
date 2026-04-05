@@ -1,10 +1,16 @@
 """
 libs.data.analysis — Обработка и анализ данных (Pandas / Numpy).
 
+Все публичные методы возвращают Pydantic-модели, обеспечивая единую
+типизацию от датчика до экрана телефона:
+  - Бот берёт модель и отправляет пользователю.
+  - API берёт ту же модель и отдаёт JSON.
+
 Пример использования:
     svc = AnalysisService()
-    df = svc.process_metrics([{"temp": 22.5, "hum": 60}, ...])
-    stats = svc.describe(df)
+    result = svc.process_metrics([{"temp": 22.5, "hum": 60}, ...])
+    result.summary   # MetricsSummary (Pydantic)
+    result.df         # DataFrame (для viz)
 """
 
 from __future__ import annotations
@@ -15,7 +21,17 @@ from pydantic import BaseModel, Field
 from loguru import logger
 
 
-# ── Модели данных ────────────────────────────────────────────────────────────
+# ── Модели данных (Pydantic — единый контракт для Bot / API) ─────────────────
+
+
+class ColumnStats(BaseModel):
+    """Статистика по одной числовой колонке."""
+
+    mean: float = 0.0
+    std: float = 0.0
+    min: float = 0.0
+    max: float = 0.0
+    median: float = 0.0
 
 
 class MetricsSummary(BaseModel):
@@ -23,7 +39,45 @@ class MetricsSummary(BaseModel):
 
     count: int = 0
     columns: list[str] = Field(default_factory=list)
-    stats: dict[str, dict[str, float]] = Field(default_factory=dict)
+    stats: dict[str, ColumnStats] = Field(default_factory=dict)
+
+
+class AnomalyReport(BaseModel):
+    """Результат обнаружения аномалий."""
+
+    total_values: int = 0
+    anomaly_indices: list[int] = Field(default_factory=list)
+    anomaly_count: int = 0
+    threshold: float = 2.0
+
+
+class OutlierReport(BaseModel):
+    """Результат фильтрации выбросов."""
+
+    original_count: int = 0
+    filtered_count: int = 0
+    removed_count: int = 0
+    column: str = ""
+    std_factor: float = 2.0
+
+
+class AnalysisResult(BaseModel):
+    """Универсальный результат анализа.
+
+    Содержит Pydantic-сводку (для сериализации в JSON / отправки в Telegram)
+    и ссылку на DataFrame (для визуализации / дальнейшей обработки).
+    """
+
+    summary: MetricsSummary = Field(default_factory=MetricsSummary)
+    records: list[dict[str, Any]] = Field(default_factory=list)
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    @property
+    def df(self) -> Any:
+        """Вернуть DataFrame из records (для передачи в VizService)."""
+        import pandas as pd
+        return pd.DataFrame(self.records) if self.records else pd.DataFrame()
 
 
 class TimeSeriesConfig(BaseModel):
@@ -39,24 +93,36 @@ class TimeSeriesConfig(BaseModel):
 
 
 class AnalysisService:
-    """Обертка для анализа данных через Pandas/Numpy."""
+    """Обертка для анализа данных через Pandas/Numpy.
+
+    Все публичные методы возвращают Pydantic-модели для единого контракта.
+    """
 
     def __init__(self) -> None:
         logger.info("AnalysisService инициализирован")
 
-    # ── DataFrame операции ───────────────────────────────────────────────
+    # ── Основной метод ───────────────────────────────────────────────────
 
-    def process_metrics(self, raw_data: list[dict[str, Any]]) -> Any:
-        """Превратить сырые данные (список словарей) в DataFrame."""
+    def process_metrics(self, raw_data: list[dict[str, Any]]) -> AnalysisResult:
+        """Превратить сырые данные в AnalysisResult (Pydantic).
+
+        Возвращает объект, из которого можно:
+          - result.summary     → MetricsSummary для JSON / Telegram
+          - result.records     → list[dict] для сериализации
+          - result.df          → DataFrame для VizService
+        """
         import pandas as pd
 
         if not raw_data:
             logger.warning("process_metrics: пустой набор данных")
-            return pd.DataFrame()
+            return AnalysisResult()
 
         df = pd.DataFrame(raw_data)
+        summary = self._build_summary(df)
+        records = df.to_dict(orient="records")
+
         logger.info("process_metrics: {} строк, {} колонок", len(df), len(df.columns))
-        return df
+        return AnalysisResult(summary=summary, records=records)
 
     def describe(self, df: Any) -> MetricsSummary:
         """Получить статистическую сводку по DataFrame."""
@@ -65,24 +131,9 @@ class AnalysisService:
         if not isinstance(df, pd.DataFrame) or df.empty:
             return MetricsSummary()
 
-        numeric_cols = df.select_dtypes(include="number")
-        desc = numeric_cols.describe()
+        return self._build_summary(df)
 
-        stats: dict[str, dict[str, float]] = {}
-        for col in desc.columns:
-            stats[col] = {
-                "mean": float(desc[col].get("mean", 0)),
-                "std": float(desc[col].get("std", 0)),
-                "min": float(desc[col].get("min", 0)),
-                "max": float(desc[col].get("max", 0)),
-                "median": float(numeric_cols[col].median()),
-            }
-
-        return MetricsSummary(
-            count=len(df),
-            columns=list(df.columns),
-            stats=stats,
-        )
+    # ── Фильтрация и ресемплинг ──────────────────────────────────────────
 
     def filter_outliers(
         self,
@@ -90,10 +141,14 @@ class AnalysisService:
         column: str,
         *,
         std_factor: float = 2.0,
-    ) -> Any:
-        """Удалить выбросы по правилу N стандартных отклонений."""
+    ) -> OutlierReport:
+        """Удалить выбросы. Возвращает Pydantic-отчёт.
+
+        Отфильтрованный DataFrame доступен через повторный process_metrics.
+        """
         import numpy as np
 
+        original_count = len(df)
         mean = float(np.mean(df[column]))
         std = float(np.std(df[column]))
 
@@ -101,13 +156,39 @@ class AnalysisService:
             (df[column] >= mean - std_factor * std)
             & (df[column] <= mean + std_factor * std)
         ]
-        removed = len(df) - len(filtered)
+        removed = original_count - len(filtered)
+
         if removed:
             logger.info("filter_outliers: удалено {} выбросов из '{}'", removed, column)
-        return filtered
 
-    def resample_timeseries(self, df: Any, config: TimeSeriesConfig) -> Any:
-        """Ресемплинг временного ряда."""
+        return OutlierReport(
+            original_count=original_count,
+            filtered_count=len(filtered),
+            removed_count=removed,
+            column=column,
+            std_factor=std_factor,
+        )
+
+    def filter_outliers_df(
+        self,
+        df: Any,
+        column: str,
+        *,
+        std_factor: float = 2.0,
+    ) -> Any:
+        """Удалить выбросы и вернуть очищенный DataFrame (для цепочек)."""
+        import numpy as np
+
+        mean = float(np.mean(df[column]))
+        std = float(np.std(df[column]))
+
+        return df[
+            (df[column] >= mean - std_factor * std)
+            & (df[column] <= mean + std_factor * std)
+        ]
+
+    def resample_timeseries(self, df: Any, config: TimeSeriesConfig) -> AnalysisResult:
+        """Ресемплинг временного ряда. Возвращает AnalysisResult."""
         import pandas as pd
 
         if config.time_column not in df.columns:
@@ -126,10 +207,15 @@ class AnalysisService:
             elif config.fill_method == "interpolate":
                 df = df.interpolate()
 
+        df = df.reset_index()
         logger.info("resample_timeseries: {} строк после ресемплинга", len(df))
-        return df.reset_index()
 
-    # ── Numpy-утилиты ────────────────────────────────────────────────────
+        return AnalysisResult(
+            summary=self._build_summary(df),
+            records=df.to_dict(orient="records"),
+        )
+
+    # ── Numpy-утилиты (возвращают Pydantic где есть смысл) ───────────────
 
     @staticmethod
     def moving_average(values: list[float], window: int = 5) -> list[float]:
@@ -158,13 +244,45 @@ class AnalysisService:
         values: list[float],
         *,
         threshold: float = 2.0,
-    ) -> list[int]:
-        """Обнаружение аномалий по z-score. Возвращает индексы аномальных значений."""
+    ) -> AnomalyReport:
+        """Обнаружение аномалий по z-score. Возвращает Pydantic-отчёт."""
         import numpy as np
 
         arr = np.array(values)
         mean, std = float(arr.mean()), float(arr.std())
+
         if std == 0:
-            return []
+            return AnomalyReport(total_values=len(values), threshold=threshold)
+
         z_scores = np.abs((arr - mean) / std)
-        return [int(i) for i in np.where(z_scores > threshold)[0]]
+        indices = [int(i) for i in np.where(z_scores > threshold)[0]]
+
+        return AnomalyReport(
+            total_values=len(values),
+            anomaly_indices=indices,
+            anomaly_count=len(indices),
+            threshold=threshold,
+        )
+
+    # ── Приватные хелперы ────────────────────────────────────────────────
+
+    def _build_summary(self, df: Any) -> MetricsSummary:
+        """Построить MetricsSummary из DataFrame."""
+        numeric_cols = df.select_dtypes(include="number")
+        desc = numeric_cols.describe()
+
+        stats: dict[str, ColumnStats] = {}
+        for col in desc.columns:
+            stats[col] = ColumnStats(
+                mean=float(desc[col].get("mean", 0)),
+                std=float(desc[col].get("std", 0)),
+                min=float(desc[col].get("min", 0)),
+                max=float(desc[col].get("max", 0)),
+                median=float(numeric_cols[col].median()),
+            )
+
+        return MetricsSummary(
+            count=len(df),
+            columns=list(df.columns),
+            stats=stats,
+        )

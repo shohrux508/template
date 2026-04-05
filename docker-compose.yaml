@@ -1,0 +1,69 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  docker-compose.yaml — Инфраструктура для разработки
+#
+#  Поднимает одной командой: Redis, MQTT-брокер, Qdrant
+#  Использование:
+#    docker compose up -d       # запуск
+#    docker compose down        # остановка
+#    make up / make down        # через Makefile
+# ═══════════════════════════════════════════════════════════════════════════
+
+services:
+
+  # ── Redis — быстрое хранилище / кэш ────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: template-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── MQTT Broker (Eclipse Mosquitto) ────────────────────────────────────
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: template-mqtt
+    ports:
+      - "1883:1883"   # MQTT
+      - "9001:9001"   # WebSocket (опционально)
+    volumes:
+      - mqtt_data:/mosquitto/data
+      - mqtt_log:/mosquitto/log
+      - ./docker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -i healthcheck -W 3 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ── Qdrant — векторная БД для RAG ─────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: template-qdrant
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: 6334
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/readyz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  redis_data:
+  mqtt_data:
+  mqtt_log:
+  qdrant_data:
