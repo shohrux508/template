@@ -248,6 +248,7 @@ container.console.table(data, title="Отчет за день")
 
 ### Добавление роутера (Telegram)
 1. Создайте роутер в `app/telegram/routers/`.
+<<<<<<< HEAD
 2. Подключите в `app/telegram/bot.py`.
 
 ### Добавление роутера (API)
@@ -256,6 +257,13 @@ container.console.table(data, title="Отчет за день")
 
 ### Отключение ненужного модуля libs/
 Закомментируйте соответствующие строки в `app/app.py` → `setup_libs()`.
+=======
+2. Подключите его в `app/telegram/bot.py`. Роутеры автоматически получат `container` из `Dispatcher` при вызове хендлера.
+
+### Добавление роутера (API)
+1. Создайте роутер в `app/api/routers/`.
+2. Подключите его в `app/api/server.py`. Для получения зависимостей используйте `Depends` и функцию `get_example_service` (или аналогичную) из `app/api/dependencies.py`.
+>>>>>>> 26ceb92084a5d68755257b9edf5d54583b4e0f76
 
 ## Стек технологий
 
